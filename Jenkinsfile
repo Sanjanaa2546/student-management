@@ -12,6 +12,11 @@ pipeline {
                 git branch: 'main', url: 'https://github.com/Sanjanaa2546/student-management.git'
             }
         }
+        stage('Secret Scan (Gitleaks)') {
+            steps {
+                bat '"%DOCKER%" run --rm -v "%WORKSPACE%:/repo" zricethezav/gitleaks:latest detect --source=/repo -v'
+            }
+        }
         stage('Build & Test with Maven') {
             steps {
                 bat 'mvn clean package'
