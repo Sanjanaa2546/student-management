@@ -1,0 +1,29 @@
+---
+# Configuration-management playbook: applies the Kubernetes manifests and
+# checks the rollout. Run from the repo root (inside WSL or an Ansible container):
+#   ansible-playbook -i ansible/inventory.ini ansible/deploy.yml
+- name: Deploy student-management to AKS
+  hosts: local
+  gather_facts: false
+  vars:
+    manifests_dir: "{{ playbook_dir }}/../k8s"
+  tasks:
+    - name: Apply Kubernetes manifests
+      ansible.builtin.command: kubectl apply -f {{ manifests_dir }}
+      register: apply_out
+      changed_when: "'configured' in apply_out.stdout or 'created' in apply_out.stdout"
+
+    - name: Wait for the rollout to finish
+      ansible.builtin.command: kubectl rollout status deployment/student-management --timeout=180s
+      changed_when: false
+
+    - name: Get the public IP of the service
+      ansible.builtin.command: >
+        kubectl get service student-management-service
+        -o jsonpath={.status.loadBalancer.ingress[0].ip}
+      register: svc_ip
+      changed_when: false
+
+    - name: Show where the app is running
+      ansible.builtin.debug:
+        msg: "Application endpoint: http://{{ svc_ip.stdout }}"

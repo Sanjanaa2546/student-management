@@ -1,42 +1,103 @@
 pipeline {
     agent any
+
     environment {
         IMAGE_NAME = "student-management"
-        CONTAINER_NAME = "student-management-container"
-        APP_PORT = "8080"
-        DOCKER = "C:\\Users\\chsan\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe"
+        ACR_SERVER = "sanjuuacr2026.azurecr.io"
+        FULL_IMAGE = "${ACR_SERVER}/${IMAGE_NAME}:${BUILD_NUMBER}"
+        DOCKER     = "C:\\Users\\chsan\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\docker.exe"
     }
+
+    triggers {
+        // Checks GitHub every minute, so a push starts the pipeline automatically.
+        pollSCM('* * * * *')
+    }
+
     stages {
         stage('Checkout') {
             steps {
                 git branch: 'main', url: 'https://github.com/Sanjanaa2546/student-management.git'
             }
         }
+
         stage('Secret Scan (Gitleaks)') {
             steps {
                 bat '"%DOCKER%" run --rm -v "%WORKSPACE%:/repo" zricethezav/gitleaks:latest detect --source=/repo -v'
             }
         }
-        stage('Build & Test with Maven') {
+
+        stage('Build with Maven') {
             steps {
-                bat 'mvn clean package'
+                bat 'mvn -B clean package -DskipTests'
             }
         }
+
+        stage('Unit Tests') {
+            steps {
+                bat 'mvn -B test'
+            }
+            post {
+                always {
+                    junit allowEmptyResults: true, testResults: 'target/surefire-reports/*.xml'
+                }
+            }
+        }
+
         stage('Build Docker Image') {
             steps {
-                bat '"%DOCKER%" build -t %IMAGE_NAME%:%BUILD_NUMBER% .'
-                bat '"%DOCKER%" tag %IMAGE_NAME%:%BUILD_NUMBER% %IMAGE_NAME%:latest'
+                bat '"%DOCKER%" build -t %FULL_IMAGE% -t %ACR_SERVER%/%IMAGE_NAME%:latest .'
             }
         }
-        stage('Deploy Container') {
+
+        stage('Push to ACR') {
             steps {
-                bat '"%DOCKER%" rm -f %CONTAINER_NAME% || exit 0'
-                bat '"%DOCKER%" run -d --name %CONTAINER_NAME% -p %APP_PORT%:8080 %IMAGE_NAME%:latest'
+                withCredentials([usernamePassword(credentialsId: 'acr-creds', usernameVariable: 'ACR_USER', passwordVariable: 'ACR_PASS')]) {
+                    bat 'echo %ACR_PASS%| "%DOCKER%" login %ACR_SERVER% -u %ACR_USER% --password-stdin'
+                }
+                bat '"%DOCKER%" push %FULL_IMAGE%'
+                bat '"%DOCKER%" push %ACR_SERVER%/%IMAGE_NAME%:latest'
+            }
+        }
+
+        stage('Deploy to AKS') {
+            steps {
+                withCredentials([file(credentialsId: 'aks-kubeconfig', variable: 'KUBECONFIG')]) {
+                    bat 'kubectl apply -f k8s/'
+                    bat 'kubectl set image deployment/student-management student-management=%FULL_IMAGE%'
+                }
+            }
+        }
+
+        stage('Verify Deployment') {
+            steps {
+                withCredentials([file(credentialsId: 'aks-kubeconfig', variable: 'KUBECONFIG')]) {
+                    bat 'kubectl rollout status deployment/student-management --timeout=180s'
+                    bat 'kubectl get pods -l app=student-management'
+                    bat 'kubectl get service student-management-service'
+                    powershell '''
+                        $ip = ""
+                        for ($i = 0; $i -lt 30 -and -not $ip; $i++) {
+                            $ip = kubectl get service student-management-service -o jsonpath="{.status.loadBalancer.ingress[0].ip}"
+                            if (-not $ip) { Start-Sleep -Seconds 10 }
+                        }
+                        if (-not $ip) { throw "No external IP assigned" }
+                        Write-Host "Service IP: $ip"
+                        try {
+                            $r = Invoke-WebRequest -UseBasicParsing -Uri "http://$ip/" -TimeoutSec 30
+                            Write-Host "HTTP status: $($r.StatusCode)"
+                        } catch {
+                            if ($_.Exception.Response) { Write-Host "HTTP status: $([int]$_.Exception.Response.StatusCode)" }
+                            else { throw "App not reachable: $_" }
+                        }
+                        Write-Host "App is up: http://$ip"
+                    '''
+                }
             }
         }
     }
+
     post {
-        success { echo 'Pipeline completed successfully.' }
-        failure { echo 'Pipeline failed.' }
+        success { echo "Deployed ${FULL_IMAGE} to AKS successfully." }
+        failure { echo 'Pipeline failed - check the stage logs.' }
     }
 }
