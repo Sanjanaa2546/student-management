@@ -1,3 +1,4 @@
+
 pipeline {
     agent any
 
@@ -9,7 +10,7 @@ pipeline {
     }
 
     triggers {
-        // Checks GitHub every minute, so a push starts the pipeline automatically.
+        // Checks GitHub every minute for new commits.
         pollSCM('* * * * *')
     }
 
@@ -54,6 +55,7 @@ pipeline {
                 withCredentials([usernamePassword(credentialsId: 'acr-creds', usernameVariable: 'ACR_USER', passwordVariable: 'ACR_PASS')]) {
                     bat 'echo %ACR_PASS%| "%DOCKER%" login %ACR_SERVER% -u %ACR_USER% --password-stdin'
                 }
+
                 bat '"%DOCKER%" push %FULL_IMAGE%'
                 bat '"%DOCKER%" push %ACR_SERVER%/%IMAGE_NAME%:latest'
             }
@@ -71,25 +73,47 @@ pipeline {
         stage('Verify Deployment') {
             steps {
                 withCredentials([file(credentialsId: 'aks-kubeconfig', variable: 'KUBECONFIG')]) {
+
                     bat 'kubectl rollout status deployment/student-management --timeout=180s'
                     bat 'kubectl get pods -l app=student-management'
                     bat 'kubectl get service student-management-service'
+
                     powershell '''
                         $ip = ""
+
                         for ($i = 0; $i -lt 30 -and -not $ip; $i++) {
                             $ip = kubectl get service student-management-service -o jsonpath="{.status.loadBalancer.ingress[0].ip}"
-                            if (-not $ip) { Start-Sleep -Seconds 10 }
+
+                            if (-not $ip) {
+                                Start-Sleep -Seconds 10
+                            }
                         }
-                        if (-not $ip) { throw "No external IP assigned" }
+
+                        if (-not $ip) {
+                            throw "No external IP assigned"
+                        }
+
                         Write-Host "Service IP: $ip"
+
                         try {
-                            $r = Invoke-WebRequest -UseBasicParsing -Uri "http://$ip/" -TimeoutSec 30
+                            $url = "http://$ip/students/health"
+
+                            $r = Invoke-WebRequest `
+                                -UseBasicParsing `
+                                -Uri $url `
+                                -TimeoutSec 30
+
+                            if ($r.StatusCode -ne 200) {
+                                throw "Unexpected HTTP status: $($r.StatusCode)"
+                            }
+
                             Write-Host "HTTP status: $($r.StatusCode)"
+                            Write-Host "Health response: $($r.Content)"
+                            Write-Host "Application health check PASSED"
+
                         } catch {
-                            if ($_.Exception.Response) { Write-Host "HTTP status: $([int]$_.Exception.Response.StatusCode)" }
-                            else { throw "App not reachable: $_" }
+                            throw "Application health check FAILED: $_"
                         }
-                        Write-Host "App is up: http://$ip"
                     '''
                 }
             }
@@ -97,7 +121,12 @@ pipeline {
     }
 
     post {
-        success { echo "Deployed ${FULL_IMAGE} to AKS successfully." }
-        failure { echo 'Pipeline failed - check the stage logs.' }
+        success {
+            echo "Deployed ${FULL_IMAGE} to AKS successfully."
+        }
+
+        failure {
+            echo 'Pipeline failed - check the stage logs.'
+        }
     }
 }
