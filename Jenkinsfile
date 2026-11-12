@@ -30,9 +30,9 @@ pipeline {
 
         stage('Secret Scan') {
             steps {
-                bat 'gitleaks detect --source . --redact --exit-code 1'
-            }
-        }
+                bat '"%DOCKER_EXE%" run --rm -v "%WORKSPACE%:/repo" zricethezav/gitleaks:latest detect --source=/repo -v'
+    }
+}
 
         stage('Build with Maven') {
             steps {
