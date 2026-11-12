@@ -96,7 +96,7 @@ pipeline {
                         Write-Host "Service IP: $ip"
 
                         try {
-                            $url = "http://$ip/students/health"
+                             "$url = "http://$ip:8081/students/health"
 
                             $r = Invoke-WebRequest `
                                 -UseBasicParsing `
